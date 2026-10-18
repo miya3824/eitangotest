@@ -171,6 +171,8 @@
   @keyframes flip { from { transform: perspective(600px) rotateY(-28deg); opacity: .3; } to { transform: none; opacity: 1; } }
   .range-label { font-size: 13px; color: var(--pencil); margin-bottom: 6px; }
   .word { font-family: var(--hand); font-weight: 600; font-size: 44px; line-height: 1.2; word-break: break-word; }
+  .word-rate { font-size: 13px; color: var(--pencil); margin-top: 10px; min-height: 1.4em; }
+  .word-rate b { font-family: var(--hand); font-weight: 600; font-size: 16px; color: var(--ink); }
 
   /* ヒント：水色の付箋 */
   .hint-toggle {
@@ -309,6 +311,7 @@
     <div id="word-card" class="word-card">
       <div id="range-label" class="range-label">この英単語の意味は？</div>
       <div id="word" class="word">---</div>
+      <div id="word-rate" class="word-rate"></div>
     </div>
 
     <button id="hint-btn" class="btn hint-toggle" aria-expanded="false" aria-controls="hint-area">ヒントを見る</button>
@@ -591,9 +594,9 @@ async function callRecordAPI(payload) {
 }
 
 function totalsText(t) {
-  if (!t || !t.total) return "まだ記録がありません。最初の1セットに挑戦しよう！";
-  const rate = Math.round((t.correct / t.total) * 100);
-  return `累計 <b>${t.correct}</b>問正解 ／ ${t.total}問中（正答率${rate}%・${t.plays}回）`;
+  // 生徒には累計正解数だけを見せる（解いた問題数・正答率は先生のシートでのみ確認）
+  if (!t || !t.correct) return "正解するたびに、ここに累計が増えていくよ。";
+  return `これまでに <b>${t.correct}</b>問正解！`;
 }
 
 let totalsRequest = 0;
@@ -610,6 +613,27 @@ async function refreshTotals() {
   } catch (e) {
     if (req === totalsRequest) el.textContent = "成績を読み込めませんでした（通信を確認してください）";
   }
+}
+
+/* ===== みんなの正答率 ===== */
+const MIN_ATTEMPTS_FOR_RATE = 3; // この回数以上解かれた単語だけ正答率を出す
+let wordStats = {};              // { "3級|make": [解答数, 正解数] }
+
+async function loadWordStats() {
+  if (!RECORD_API_URL) return;
+  try {
+    const data = await callRecordAPI({ action: "wordStats" });
+    wordStats = data.stats || {};
+  } catch (e) {
+    /* 読めなくてもクイズは続けられる */
+  }
+}
+
+function wordRateHTML(q) {
+  if (!RECORD_API_URL) return "";
+  const s = wordStats[`${q.grade}|${q.vocab}`];
+  if (!s || s[0] < MIN_ATTEMPTS_FOR_RATE) return "みんなの正答率：集計中";
+  return `みんなの正答率 <b>${Math.round((s[1] / s[0]) * 100)}%</b>`;
 }
 
 // 送れなかった記録は端末に保存しておき、次の機会に送り直す
@@ -640,7 +664,8 @@ async function saveRecord(record) {
   if (result && result.remaining === 0) {
     const t = result.totals;
     status.className = "record-status ok";
-    status.textContent = t ? `✅ 記録しました。累計 ${t.correct}問正解（${t.plays}回目）` : "✅ 記録しました";
+    status.textContent = t ? `✅ 記録しました。これまでに ${t.correct}問正解！` : "✅ 記録しました";
+    loadWordStats(); // 今回の解答を反映した正答率を読み直す
   } else {
     status.className = "record-status warn";
     status.textContent = "⚠️ 記録を送れませんでした。次にアプリを開いたときに自動で送り直します。";
@@ -757,6 +782,7 @@ function renderQuestion() {
   $("score-text").textContent = `正解 ${score}`;
   $("progress-fill").style.width = `${(current / total) * 100}%`;
   $("word").textContent = q.vocab;
+  $("word-rate").innerHTML = wordRateHTML(q);
 
   const card = $("word-card");
   card.classList.remove("flip");
@@ -876,6 +902,7 @@ function showResult() {
     total,
     maxCombo,
     missed: history.filter(h => !h.correct).map(h => h.vocab),
+    answers: history.map(h => ({ vocab: h.vocab, correct: h.correct })),
     playedAt: new Date().toISOString()
   });
 }
@@ -894,7 +921,7 @@ $("back-btn").addEventListener("click", () => { renderSelectors(); refreshTotals
 $("student-name").value = store.get(STORAGE_NAME_KEY, "");
 $("student-name").addEventListener("input", () => { store.set(STORAGE_NAME_KEY, $("student-name").value); updateStartButton(); });
 $("student-name").addEventListener("change", refreshTotals);
-flushQueue().then(refreshTotals);
+flushQueue().then(() => { refreshTotals(); loadWordStats(); });
 $("hint-btn").addEventListener("click", () => {
   setHint(!$("hint-area").classList.contains("open"));
 });
