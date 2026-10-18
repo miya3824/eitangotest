@@ -100,6 +100,20 @@
 
   .select-heading { font-family: var(--hand); font-weight: 600; font-size: 18px; margin: 0 0 10px; }
 
+  /* 名前入力と累計 */
+  .name-input {
+    width: 100%; min-height: 52px; padding: 10px 14px;
+    font-family: var(--ui); font-size: 18px; font-weight: 700; color: var(--ink);
+    background: #fff; border: 1.5px solid var(--ink); border-radius: 12px;
+  }
+  .name-input::placeholder { color: #a3abba; font-weight: 500; }
+  .name-input:focus-visible { outline: 3px solid #5b8fd9; outline-offset: 2px; }
+  .totals { font-size: 14px; color: var(--pencil); margin: 8px 2px 0; line-height: 1.6; min-height: 1.6em; }
+  .totals b { font-family: var(--hand); font-weight: 600; font-size: 18px; color: var(--ink); }
+  .record-status { font-size: 14px; color: var(--pencil); margin: 0; line-height: 1.6; }
+  .record-status.ok { color: #1f7a45; }
+  .record-status.warn { color: #a3610f; }
+
   /* 級：インデックスシール風（上の色帯が級の色） */
   .grades { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
   .sets { display: grid; grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); gap: 10px; }
@@ -264,11 +278,17 @@
     <p id="load-status" class="status"><span class="spinner"></span>単語データを読み込み中...</p>
 
     <div>
-      <p class="select-heading">① 級を選ぶ</p>
+      <label class="select-heading" for="student-name" style="display:block">① 名前を入れる</label>
+      <input id="student-name" class="name-input" type="text" maxlength="40" autocomplete="nickname"
+             placeholder="生徒番号 または ニックネーム">
+      <p id="totals" class="totals"></p>
+    </div>
+    <div>
+      <p class="select-heading">② 級を選ぶ</p>
       <div id="grades" class="grades"></div>
     </div>
     <div>
-      <p class="select-heading">② セットを選ぶ</p>
+      <p class="select-heading">③ セットを選ぶ</p>
       <div id="sets" class="sets"></div>
     </div>
 
@@ -312,6 +332,7 @@
     <div id="rank" class="rank-wrap" aria-hidden="true"></div>
     <p id="score" class="score">0問正解！</p>
     <p id="score-msg" class="score-msg"></p>
+    <p id="record-status" class="record-status"></p>
     <ul id="review" class="review"></ul>
     <div class="result-actions">
       <button id="retry-btn" class="btn btn-primary">もう一度挑戦する</button>
@@ -325,8 +346,13 @@
 <script>
 const SPREADSHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vS7fDrJNr5HALyJWBLEvyOpAUgb2xr_GcVdVlxxgJBaYolIUoOjkm_FtzO4JkIlVJCqWZRMZ6DbqutO/pub?gid=1917643761&single=true&output=csv";
 
+// 成績記録用 Google Apps Script の「ウェブアプリのURL（…/exec）」。空欄なら記録しない
+const RECORD_API_URL = "https://script.google.com/macros/s/AKfycby8Sq1Ku9CwDC_51D7h3wkPsBiURxAJDpMKntgQK6Yl_p-SpVNpEdBLdU-ffF3P8u3N/exec";
+
 /* ===== 設定 ===== */
 const FETCH_TIMEOUT_MS = 8000; // 通信タイムアウト
+const STORAGE_NAME_KEY = "eitango_student";
+const STORAGE_QUEUE_KEY = "eitango_pending_records";
 
 // 級の表示順。MAIN_GRADES は常に表示、それ以外はデータがあるときだけ表示
 const MAIN_GRADES = ["4級", "3級", "準2級", "2級", "準1級", "1級"];
@@ -527,7 +553,98 @@ function renderSelectors() {
     sBox.appendChild(btn);
   });
 
-  $("start-btn").disabled = selectedSet === null;
+  updateStartButton();
+}
+
+function updateStartButton() {
+  const needName = !!RECORD_API_URL && !studentName();
+  const btn = $("start-btn");
+  btn.disabled = selectedSet === null || needName;
+  btn.textContent = needName && selectedSet !== null ? "名前を入れるとスタートできます" : "スタート";
+}
+
+/* ===== 生徒名と成績記録 ===== */
+const studentName = () => $("student-name").value.normalize("NFKC").trim().slice(0, 40);
+
+const store = {
+  get(key, fallback) { try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch (e) { return fallback; } },
+  set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* 保存できない環境では何もしない */ } }
+};
+
+async function callRecordAPI(payload) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    // text/plain で送ると、ブラウザの事前確認（プリフライト）なしで Apps Script に届く
+    const res = await fetch(RECORD_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "記録に失敗しました");
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function totalsText(t) {
+  if (!t || !t.total) return "まだ記録がありません。最初の1セットに挑戦しよう！";
+  const rate = Math.round((t.correct / t.total) * 100);
+  return `累計 <b>${t.correct}</b>問正解 ／ ${t.total}問中（正答率${rate}%・${t.plays}回）`;
+}
+
+let totalsRequest = 0;
+async function refreshTotals() {
+  const el = $("totals");
+  const name = studentName();
+  if (!RECORD_API_URL) { el.textContent = ""; return; }
+  if (!name) { el.textContent = "名前を入れると、これまでの成績が表示されます"; return; }
+  const req = ++totalsRequest;
+  el.textContent = "成績を読み込み中...";
+  try {
+    const data = await callRecordAPI({ action: "totals", student: name });
+    if (req === totalsRequest) el.innerHTML = totalsText(data.totals);
+  } catch (e) {
+    if (req === totalsRequest) el.textContent = "成績を読み込めませんでした（通信を確認してください）";
+  }
+}
+
+// 送れなかった記録は端末に保存しておき、次の機会に送り直す
+async function flushQueue() {
+  if (!RECORD_API_URL) return null;
+  let queue = store.get(STORAGE_QUEUE_KEY, []);
+  let lastTotals = null;
+  while (queue.length) {
+    try {
+      const data = await callRecordAPI(queue[0]);
+      lastTotals = data.totals;
+      queue = queue.slice(1);
+      store.set(STORAGE_QUEUE_KEY, queue);
+    } catch (e) {
+      break;
+    }
+  }
+  return { remaining: queue.length, totals: lastTotals };
+}
+
+async function saveRecord(record) {
+  const status = $("record-status");
+  if (!RECORD_API_URL) { status.textContent = ""; return; }
+  status.className = "record-status";
+  status.textContent = "成績を記録しています...";
+  store.set(STORAGE_QUEUE_KEY, [...store.get(STORAGE_QUEUE_KEY, []), record]);
+  const result = await flushQueue();
+  if (result && result.remaining === 0) {
+    const t = result.totals;
+    status.className = "record-status ok";
+    status.textContent = t ? `✅ 記録しました。累計 ${t.correct}問正解（${t.plays}回目）` : "✅ 記録しました";
+  } else {
+    status.className = "record-status warn";
+    status.textContent = "⚠️ 記録を送れませんでした。次にアプリを開いたときに自動で送り直します。";
+  }
 }
 
 /* ===== ユーティリティ ===== */
@@ -749,6 +866,18 @@ function showResult() {
   if (nextSet !== null) nextBtn.textContent = `次のセットへ（${setLabel(nextSet)}）`;
 
   showScreen("result");
+
+  saveRecord({
+    action: "record",
+    student: studentName(),
+    grade: selectedGrade,
+    set: setLabel(selectedSet),
+    correct: score,
+    total,
+    maxCombo,
+    missed: history.filter(h => !h.correct).map(h => h.vocab),
+    playedAt: new Date().toISOString()
+  });
 }
 
 /* ===== イベント ===== */
@@ -759,7 +888,13 @@ $("next-set-btn").addEventListener("click", () => {
   const nextSet = nextSetOf(selectedGrade, selectedSet);
   if (nextSet !== null) { selectedSet = nextSet; renderSelectors(); startGame(); }
 });
-$("back-btn").addEventListener("click", () => { renderSelectors(); showScreen("title"); });
+$("back-btn").addEventListener("click", () => { renderSelectors(); refreshTotals(); showScreen("title"); });
+
+// 名前：端末に覚えておき、入力が終わったら累計を読み込む
+$("student-name").value = store.get(STORAGE_NAME_KEY, "");
+$("student-name").addEventListener("input", () => { store.set(STORAGE_NAME_KEY, $("student-name").value); updateStartButton(); });
+$("student-name").addEventListener("change", refreshTotals);
+flushQueue().then(refreshTotals);
 $("hint-btn").addEventListener("click", () => {
   setHint(!$("hint-area").classList.contains("open"));
 });
