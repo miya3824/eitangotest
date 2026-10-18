@@ -107,6 +107,10 @@
     background: #fff; border: 1.5px solid var(--ink); border-radius: 12px;
   }
   .name-input::placeholder { color: #a3abba; font-weight: 500; }
+  .id-fields { display: grid; grid-template-columns: 2fr 3fr; gap: 10px; }
+  .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .field-label { font-size: 13px; color: var(--pencil); font-weight: 700; }
+  .field .name-input { min-width: 0; }
   .name-input:focus-visible { outline: 3px solid #5b8fd9; outline-offset: 2px; }
   .totals { font-size: 14px; color: var(--pencil); margin: 8px 2px 0; line-height: 1.6; min-height: 1.6em; }
   .totals b { font-family: var(--hand); font-weight: 600; font-size: 18px; color: var(--ink); }
@@ -280,9 +284,19 @@
     <p id="load-status" class="status"><span class="spinner"></span>単語データを読み込み中...</p>
 
     <div>
-      <label class="select-heading" for="student-name" style="display:block">① 名前を入れる</label>
-      <input id="student-name" class="name-input" type="text" maxlength="40" autocomplete="nickname"
-             placeholder="生徒番号 または ニックネーム">
+      <p class="select-heading">① 生徒番号とニックネーム</p>
+      <div class="id-fields">
+        <label class="field">
+          <span class="field-label">生徒番号</span>
+          <input id="student-id" class="name-input" type="text" maxlength="20" autocomplete="off"
+                 autocapitalize="characters" spellcheck="false" placeholder="例：A012">
+        </label>
+        <label class="field">
+          <span class="field-label">ニックネーム</span>
+          <input id="nickname" class="name-input" type="text" maxlength="20" autocomplete="nickname"
+                 placeholder="例：はるちゃん">
+        </label>
+      </div>
       <p id="totals" class="totals"></p>
     </div>
     <div>
@@ -354,7 +368,8 @@ const RECORD_API_URL = "https://script.google.com/macros/s/AKfycby8Sq1Ku9CwDC_51
 
 /* ===== 設定 ===== */
 const FETCH_TIMEOUT_MS = 8000; // 通信タイムアウト
-const STORAGE_NAME_KEY = "eitango_student";
+const STORAGE_ID_KEY = "eitango_student_id";
+const STORAGE_NICK_KEY = "eitango_nickname";
 const STORAGE_QUEUE_KEY = "eitango_pending_records";
 
 // 級の表示順。MAIN_GRADES は常に表示、それ以外はデータがあるときだけ表示
@@ -560,14 +575,17 @@ function renderSelectors() {
 }
 
 function updateStartButton() {
-  const needName = !!RECORD_API_URL && !studentName();
   const btn = $("start-btn");
-  btn.disabled = selectedSet === null || needName;
-  btn.textContent = needName && selectedSet !== null ? "名前を入れるとスタートできます" : "スタート";
+  const missing = !RECORD_API_URL ? "" : !studentId() ? "生徒番号を入れてね" : !nickname() ? "ニックネームを入れてね" : "";
+  btn.disabled = selectedSet === null || !!missing;
+  btn.textContent = missing && selectedSet !== null ? missing : "スタート";
 }
 
-/* ===== 生徒名と成績記録 ===== */
-const studentName = () => $("student-name").value.normalize("NFKC").trim().slice(0, 40);
+/* ===== 生徒番号・ニックネームと成績記録 ===== */
+// 識別は生徒番号（全角→半角、英字は大文字にそろえる）。呼びかけはニックネーム
+const studentId = () => $("student-id").value.normalize("NFKC").trim().toUpperCase().slice(0, 20);
+const nickname = () => $("nickname").value.normalize("NFKC").trim().slice(0, 20);
+const escapeHTML = (s) => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 const store = {
   get(key, fallback) { try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch (e) { return fallback; } },
@@ -595,24 +613,34 @@ async function callRecordAPI(payload) {
 
 function totalsText(t) {
   // 生徒には累計正解数だけを見せる（解いた問題数・正答率は先生のシートでのみ確認）
-  if (!t || !t.correct) return "正解するたびに、ここに累計が増えていくよ。";
-  return `これまでに <b>${t.correct}</b>問正解！`;
+  const nick = nickname();
+  const who = nick ? `${escapeHTML(nick)}、` : "";
+  if (!t || !t.correct) return `${who}正解するたびに、ここに累計が増えていくよ。`;
+  return `${who}これまでに <b>${t.correct}</b>問正解！`;
 }
 
 let totalsRequest = 0;
+let lastTotals = null; // { id, totals } ニックネームを打ち直したときの表示更新用
 async function refreshTotals() {
   const el = $("totals");
-  const name = studentName();
+  const id = studentId();
   if (!RECORD_API_URL) { el.textContent = ""; return; }
-  if (!name) { el.textContent = "名前を入れると、これまでの成績が表示されます"; return; }
+  if (!id) { lastTotals = null; el.textContent = "生徒番号を入れると、これまでの成績が表示されます"; return; }
   const req = ++totalsRequest;
   el.textContent = "成績を読み込み中...";
   try {
-    const data = await callRecordAPI({ action: "totals", student: name });
-    if (req === totalsRequest) el.innerHTML = totalsText(data.totals);
+    const data = await callRecordAPI({ action: "totals", student: id });
+    if (req === totalsRequest) {
+      lastTotals = { id, totals: data.totals };
+      el.innerHTML = totalsText(data.totals);
+    }
   } catch (e) {
     if (req === totalsRequest) el.textContent = "成績を読み込めませんでした（通信を確認してください）";
   }
+}
+
+function rerenderTotals() {
+  if (lastTotals && lastTotals.id === studentId()) $("totals").innerHTML = totalsText(lastTotals.totals);
 }
 
 /* ===== みんなの正答率 ===== */
@@ -872,7 +900,7 @@ function showResult() {
   $("score").textContent = `${score}問正解！`;
   $("score-msg").textContent =
     `英検${selectedGrade}・${setLabel(selectedSet)}　${total}問中${score}問` +
-    (maxCombo >= 2 ? `／最高${maxCombo}問連続` : "") + `\n${msg}`;
+    (maxCombo >= 2 ? `／最高${maxCombo}問連続` : "") + `\n${nickname() ? nickname() + "、" : ""}${msg}`;
   $("score-msg").style.whiteSpace = "pre-line";
 
   const review = $("review");
@@ -895,7 +923,8 @@ function showResult() {
 
   saveRecord({
     action: "record",
-    student: studentName(),
+    student: studentId(),
+    nickname: nickname(),
     grade: selectedGrade,
     set: setLabel(selectedSet),
     correct: score,
@@ -917,10 +946,12 @@ $("next-set-btn").addEventListener("click", () => {
 });
 $("back-btn").addEventListener("click", () => { renderSelectors(); refreshTotals(); showScreen("title"); });
 
-// 名前：端末に覚えておき、入力が終わったら累計を読み込む
-$("student-name").value = store.get(STORAGE_NAME_KEY, "");
-$("student-name").addEventListener("input", () => { store.set(STORAGE_NAME_KEY, $("student-name").value); updateStartButton(); });
-$("student-name").addEventListener("change", refreshTotals);
+// 生徒番号とニックネーム：端末に覚えておく。番号が決まったら累計を読み込む
+$("student-id").value = store.get(STORAGE_ID_KEY, "");
+$("nickname").value = store.get(STORAGE_NICK_KEY, "");
+$("student-id").addEventListener("input", () => { store.set(STORAGE_ID_KEY, $("student-id").value); lastTotals = null; updateStartButton(); });
+$("student-id").addEventListener("change", refreshTotals);
+$("nickname").addEventListener("input", () => { store.set(STORAGE_NICK_KEY, $("nickname").value); updateStartButton(); rerenderTotals(); });
 flushQueue().then(() => { refreshTotals(); loadWordStats(); });
 $("hint-btn").addEventListener("click", () => {
   setHint(!$("hint-area").classList.contains("open"));
